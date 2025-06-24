@@ -349,32 +349,47 @@ def update_orders(orderbook):
                         logging.info(f"Cancelled sell order at {o['price']}")
                     except Exception as e:
                         logging.error(f"Error canceling sell order: {e}")
-            # Place buy orders
+            # Place buy orders only if not already present at price and size
             for i in range(buy_n):
                 size = buy_sizes[i]
                 price = buy_prices[i]
                 notional = size * price
+                # Check for existing order at this price and size
+                exists = any(
+                    abs(float(o['price']) - price) < 1e-8 and abs(float(o['amount']) - size) < 1e-8
+                    for o in open_buy_orders
+                )
                 if size > 0 and notional >= MIN_NOTIONAL:
-                    try:
-                        buy_order = exchange.create_order(
-                            symbol, 'limit', 'buy', size, price, {'type': 'maker'}
-                        )
-                        logging.info(f"Placed buy order: price={price}, size={size}")
-                    except Exception as e:
-                        logging.error(f"Error placing buy order: {e}")
-            # Place sell orders
+                    if exists:
+                        logging.info(f"Skipped placing buy order at {price} size {size}: identical order already exists.")
+                    else:
+                        try:
+                            buy_order = exchange.create_order(
+                                symbol, 'limit', 'buy', size, price, {'type': 'maker'}
+                            )
+                            logging.info(f"Placed buy order: price={price}, size={size}")
+                        except Exception as e:
+                            logging.error(f"Error placing buy order: {e}")
+            # Place sell orders only if not already present at price and size
             for i in range(sell_n):
                 size = sell_sizes[i]
                 price = sell_prices[i]
                 notional = size * price
+                exists = any(
+                    abs(float(o['price']) - price) < 1e-8 and abs(float(o['amount']) - size) < 1e-8
+                    for o in open_sell_orders
+                )
                 if size > 0 and notional >= MIN_NOTIONAL:
-                    try:
-                        sell_order = exchange.create_order(
-                            symbol, 'limit', 'sell', size, price, {'type': 'maker'}
-                        )
-                        logging.info(f"Placed sell order: price={price}, size={size}")
-                    except Exception as e:
-                        logging.error(f"Error placing sell order: {e}")
+                    if exists:
+                        logging.info(f"Skipped placing sell order at {price} size {size}: identical order already exists.")
+                    else:
+                        try:
+                            sell_order = exchange.create_order(
+                                symbol, 'limit', 'sell', size, price, {'type': 'maker'}
+                            )
+                            logging.info(f"Placed sell order: price={price}, size={size}")
+                        except Exception as e:
+                            logging.error(f"Error placing sell order: {e}")
             return
 
         if shadow_mode:
