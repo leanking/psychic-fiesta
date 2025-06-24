@@ -331,6 +331,9 @@ def update_orders(orderbook):
             except Exception as e:
                 logging.error(f"Error fetching open orders: {e}")
                 open_orders = []
+            # Helper to quantize size to 5 decimals
+            def quantize_size(size):
+                return round(size, 5)
             # Cancel all open buy orders at our target prices
             open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
             for o in open_buy_orders:
@@ -349,19 +352,26 @@ def update_orders(orderbook):
                         logging.info(f"Cancelled sell order at {o['price']}")
                     except Exception as e:
                         logging.error(f"Error canceling sell order: {e}")
-            # Place buy orders only if not already present at price and size
+            # Place buy orders only if not already present at price and size (quantized)
             for i in range(buy_n):
-                size = buy_sizes[i]
+                size = quantize_size(buy_sizes[i])
                 price = buy_prices[i]
                 notional = size * price
-                # Check for existing order at this price and size
-                exists = any(
-                    abs(float(o['price']) - price) < 1e-8 and abs(float(o['amount']) - size) < 1e-8
-                    for o in open_buy_orders
-                )
+                # Check for existing order at this price and size (quantized, tolerance 1e-5)
+                exists = False
+                for o in open_buy_orders:
+                    price_match = abs(float(o['price']) - price) < 1e-8
+                    size_match = abs(float(o['amount']) - size) < 1e-5
+                    if price_match and size_match:
+                        exists = True
+                        break
                 if size > 0 and notional >= MIN_NOTIONAL:
                     if exists:
-                        logging.info(f"Skipped placing buy order at {price} size {size}: identical order already exists.")
+                        for o in open_buy_orders:
+                            if abs(float(o['price']) - price) < 1e-8:
+                                size_diff = float(o['amount']) - size
+                                logging.info(f"Skipped placing buy order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
+                                break
                     else:
                         try:
                             buy_order = exchange.create_order(
@@ -370,18 +380,25 @@ def update_orders(orderbook):
                             logging.info(f"Placed buy order: price={price}, size={size}")
                         except Exception as e:
                             logging.error(f"Error placing buy order: {e}")
-            # Place sell orders only if not already present at price and size
+            # Place sell orders only if not already present at price and size (quantized)
             for i in range(sell_n):
-                size = sell_sizes[i]
+                size = quantize_size(sell_sizes[i])
                 price = sell_prices[i]
                 notional = size * price
-                exists = any(
-                    abs(float(o['price']) - price) < 1e-8 and abs(float(o['amount']) - size) < 1e-8
-                    for o in open_sell_orders
-                )
+                exists = False
+                for o in open_sell_orders:
+                    price_match = abs(float(o['price']) - price) < 1e-8
+                    size_match = abs(float(o['amount']) - size) < 1e-5
+                    if price_match and size_match:
+                        exists = True
+                        break
                 if size > 0 and notional >= MIN_NOTIONAL:
                     if exists:
-                        logging.info(f"Skipped placing sell order at {price} size {size}: identical order already exists.")
+                        for o in open_sell_orders:
+                            if abs(float(o['price']) - price) < 1e-8:
+                                size_diff = float(o['amount']) - size
+                                logging.info(f"Skipped placing sell order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
+                                break
                     else:
                         try:
                             sell_order = exchange.create_order(
