@@ -80,13 +80,6 @@ print("USER_ADDRESS:", user_address)
 
 MIN_NOTIONAL = 10.0  # Minimum notional value for any order (in quote currency, e.g., $10)
 
-# Add at the top of the file, after other globals
-last_used_available_quote = None
-last_used_available_base = None
-STICKY_THRESHOLD = 0.001  # 0.1% change required to update order sizes
-last_used_buy_prices = None
-last_used_sell_prices = None
-
 def log_shadow_trade(order, fill_price=None):
     with open(shadow_log_file, 'a') as f:
         log_entry = {
@@ -244,8 +237,6 @@ if shadow_mode:
 # Update and place orders
 def update_orders(orderbook):
     global simulated_order_id, shadow_position
-    global last_used_available_quote, last_used_available_base
-    global last_used_buy_prices, last_used_sell_prices
     try:
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
@@ -265,38 +256,21 @@ def update_orders(orderbook):
         if LOGIC_MODE == 'zone':
             in_buy_zone = BUY_ZONE_LOW <= best_ask <= BUY_ZONE_HIGH
             in_sell_zone = SELL_ZONE_LOW <= best_bid <= SELL_ZONE_HIGH
-            if not in_buy_zone and not in_sell_zone:
-                logging.info(f"No action: best_ask {best_ask} not in buy zone and best_bid {best_bid} not in sell zone.")
-                return
-            can_place_buy = in_buy_zone
-            can_place_sell = in_sell_zone
-        else:
-            # --- SPREAD MODE: New multi-order logic ---
-            if shadow_mode:
-                logging.info("[SHADOW] Skipping multi-order logic in shadow mode.")
-                return
+            # Always place orders, but adjust sizing based on zone
             base_balance, quote_balance = get_real_balances()
             available_quote = max(0.0, quote_balance - min_quote_balance)
             available_base = max(0.0, base_balance - min_base_balance)
-            # Sticky logic: Only update if available balance changes by more than threshold
-            update_buys = True
-            update_sells = True
-            if last_used_available_quote is not None:
-                if last_used_available_quote > 0:
-                    rel_change = abs(available_quote - last_used_available_quote) / last_used_available_quote
-                else:
-                    rel_change = 1.0 if available_quote > 0 else 0.0
-                if rel_change < STICKY_THRESHOLD:
-                    update_buys = False
-            if last_used_available_base is not None:
-                if last_used_available_base > 0:
-                    rel_change = abs(available_base - last_used_available_base) / last_used_available_base
-                else:
-                    rel_change = 1.0 if available_base > 0 else 0.0
-                if rel_change < STICKY_THRESHOLD:
-                    update_sells = False
-            # --- Sticky logic for prices ---
-            # Calculate target buy and sell prices as before
+            # Ensure we do not place orders for tokens not available
+            if available_quote < 1e-8:
+                logging.info("No available quote balance. Skipping buy order placement.")
+                buy_balance = 0.0
+            else:
+                buy_balance = available_quote if in_buy_zone else available_quote * 0.1
+            if available_base < 1e-8:
+                logging.info("No available base balance. Skipping sell order placement.")
+                sell_balance = 0.0
+            else:
+                sell_balance = available_base if in_sell_zone else available_base * 0.1
             min_size = 1.0  # for profit calc
             breakeven_sell = breakeven_sell_price(buy_price, min_size)
             target_sell_price = breakeven_sell + (min_profit / min_size)
@@ -311,49 +285,6 @@ def update_orders(orderbook):
             else:
                 sell_tick = 0.00001
                 sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
-            # Only update if price changes by more than one tick
-            update_buy_prices = [True] * len(buy_prices)
-            update_sell_prices = [True] * len(sell_prices)
-            if last_used_buy_prices is not None and len(last_used_buy_prices) == len(buy_prices):
-                for i in range(len(buy_prices)):
-                    if abs(buy_prices[i] - last_used_buy_prices[i]) <= buy_tick:
-                        update_buy_prices[i] = False
-                        logging.info(f"Sticky logic: Buy price {buy_prices[i]} change <= tick. Skipping update for this price.")
-            if last_used_sell_prices is not None and len(last_used_sell_prices) == len(sell_prices):
-                for i in range(len(sell_prices)):
-                    if abs(sell_prices[i] - last_used_sell_prices[i]) <= sell_tick:
-                        update_sell_prices[i] = False
-                        logging.info(f"Sticky logic: Sell price {sell_prices[i]} change <= tick. Skipping update for this price.")
-            # If all are False and balances are sticky, skip entirely
-            if (not update_buys or not any(update_buy_prices)) and (not update_sells or not any(update_sell_prices)):
-                logging.info(f"Sticky logic: No significant price or balance change. Skipping order update.")
-                return
-            # Update last used prices
-            last_used_buy_prices = buy_prices.copy()
-            last_used_sell_prices = sell_prices.copy()
-            if update_buys:
-                last_used_available_quote = available_quote
-            if update_sells:
-                last_used_available_base = available_base
-            # BUY ORDERS
-            # Outermost buy price from spread logic (current buy_price logic)
-            min_size = 1.0  # for profit calc
-            breakeven_sell = breakeven_sell_price(buy_price, min_size)
-            target_sell_price = breakeven_sell + (min_profit / min_size)
-            breakeven_buy = breakeven_buy_price(sell_price, min_size)
-            target_buy_price = breakeven_buy - (min_profit / min_size)
-            buy_outer = min(buy_price, target_buy_price)
-            # Tick size for buy
-            buy_tick = 0.00001 if buy_outer < 1.0 else 0.0001
-            buy_prices = [buy_outer - i * buy_tick for i in range(3)]
-            # SELL ORDERS
-            if best_ask >= 1.0:
-                sell_prices = [1.0001, 1.0000, 0.9999]
-                sell_tick = 0.0001
-            else:
-                sell_tick = 0.00001
-                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
-            # Sizing weights
             def get_weights(n):
                 if n == 3:
                     return [0.4, 0.35, 0.25]
@@ -362,10 +293,9 @@ def update_orders(orderbook):
                 else:
                     return [1.0]
             # BUY SIZES
-            max_buy_size = available_quote / buy_outer if buy_outer > 0 else 0.0
+            max_buy_size = buy_balance / buy_outer if buy_outer > 0 else 0.0
             buy_weights = get_weights(3)
             buy_sizes = [max_buy_size * w for w in buy_weights]
-            # Check notional for each, fallback to 2 or 1 if needed
             buy_n = 3
             for n in [3,2,1]:
                 weights = get_weights(n)
@@ -377,7 +307,7 @@ def update_orders(orderbook):
                     buy_prices = buy_prices[:n]
                     break
             # SELL SIZES
-            max_sell_size = available_base
+            max_sell_size = sell_balance
             sell_weights = get_weights(3)
             sell_sizes = [max_sell_size * w for w in sell_weights]
             sell_n = 3
@@ -390,16 +320,13 @@ def update_orders(orderbook):
                     sell_sizes = sizes[:n]
                     sell_prices = sell_prices[:n]
                     break
-            # Cancel/replace logic
             try:
                 open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
             except Exception as e:
                 logging.error(f"Error fetching open orders: {e}")
                 open_orders = []
-            # Helper to quantize size to 5 decimals
             def quantize_size(size):
                 return round(size, 5)
-            # Cancel all open buy orders at our target prices
             open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
             for o in open_buy_orders:
                 if not any(abs(float(o['price']) - p) < 1e-8 for p in buy_prices):
@@ -408,7 +335,6 @@ def update_orders(orderbook):
                         logging.info(f"Cancelled buy order at {o['price']}")
                     except Exception as e:
                         logging.error(f"Error canceling buy order: {e}")
-            # Cancel all open sell orders at our target prices
             open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
             for o in open_sell_orders:
                 if not any(abs(float(o['price']) - p) < 1e-8 for p in sell_prices):
@@ -417,12 +343,10 @@ def update_orders(orderbook):
                         logging.info(f"Cancelled sell order at {o['price']}")
                     except Exception as e:
                         logging.error(f"Error canceling sell order: {e}")
-            # Place buy orders only if not already present at price and size (quantized)
             for i in range(buy_n):
                 size = quantize_size(buy_sizes[i])
                 price = buy_prices[i]
                 notional = size * price
-                # Check for existing order at this price and size (quantized, tolerance 1e-5)
                 exists = False
                 for o in open_buy_orders:
                     price_match = abs(float(o['price']) - price) < 1e-8
@@ -445,7 +369,6 @@ def update_orders(orderbook):
                             logging.info(f"Placed buy order: price={price}, size={size}")
                         except Exception as e:
                             logging.error(f"Error placing buy order: {e}")
-            # Place sell orders only if not already present at price and size (quantized)
             for i in range(sell_n):
                 size = quantize_size(sell_sizes[i])
                 price = sell_prices[i]
