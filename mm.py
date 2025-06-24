@@ -277,9 +277,9 @@ def update_orders(orderbook):
             breakeven_buy = breakeven_buy_price(sell_price, min_size)
             target_buy_price = breakeven_buy - (min_profit / min_size)
             buy_outer = min(buy_price, target_buy_price)
-            buy_tick = 0.0005
+            buy_tick = 0.0002
             buy_prices = [buy_outer - i * buy_tick for i in range(3)]
-            sell_tick = 0.0005
+            sell_tick = 0.0002
             if best_ask >= 1.0:
                 sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
             else:
