@@ -256,146 +256,166 @@ def update_orders(orderbook):
         if LOGIC_MODE == 'zone':
             in_buy_zone = BUY_ZONE_LOW <= best_ask <= BUY_ZONE_HIGH
             in_sell_zone = SELL_ZONE_LOW <= best_bid <= SELL_ZONE_HIGH
-            # Always place orders, but adjust sizing based on zone
             base_balance, quote_balance = get_real_balances()
             available_quote = max(0.0, quote_balance - min_quote_balance)
             available_base = max(0.0, base_balance - min_base_balance)
-            # Ensure we do not place orders for tokens not available
-            if available_quote < 1e-8:
-                logging.info("No available quote balance. Skipping buy order placement.")
-                buy_balance = 0.0
+            # --- BUY ORDERS ---
+            if in_buy_zone and available_quote > 1e-8:
+                buy_balance = available_quote  # Use 100% of available quote
+                # Three equally spaced prices between bounds
+                buy_prices = [
+                    BUY_ZONE_LOW + (BUY_ZONE_HIGH - BUY_ZONE_LOW) * i / 2 for i in range(3)
+                ]
+                def get_weights(n):
+                    if n == 3:
+                        return [0.25, 0.5, 0.25]
+                    elif n == 2:
+                        return [0.5, 0.5]
+                    else:
+                        return [1.0]
+                buy_weights = get_weights(3)
+                # Calculate max buy size in base for each price, weighted
+                max_buy_size = buy_balance / buy_prices[0] if buy_prices[0] > 0 else 0.0
+                buy_sizes = [max_buy_size * w for w in buy_weights]
+                # Adjust for notional minimums
+                buy_n = 3
+                for n in [3,2,1]:
+                    weights = get_weights(n)
+                    sizes = [max_buy_size * w for w in weights]
+                    notionals = [sizes[i] * buy_prices[i] for i in range(n)]
+                    if all(nl >= MIN_NOTIONAL for nl in notionals):
+                        buy_n = n
+                        buy_sizes = sizes[:n]
+                        buy_prices = buy_prices[:n]
+                        break
+                try:
+                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                except Exception as e:
+                    logging.error(f"Error fetching open orders: {e}")
+                    open_orders = []
+                def quantize_size(size):
+                    return round(size, 5)
+                open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
+                for o in open_buy_orders:
+                    # Cancel buy orders if their price is outside the buy zone boundaries
+                    if not (BUY_ZONE_LOW <= float(o['price']) <= BUY_ZONE_HIGH):
+                        try:
+                            exchange.cancel_order(o['id'], symbol)
+                            logging.info(f"Cancelled buy order at {o['price']} (outside buy zone)")
+                        except Exception as e:
+                            logging.error(f"Error canceling buy order: {e}")
+                for i in range(buy_n):
+                    size = quantize_size(buy_sizes[i])
+                    price = buy_prices[i]
+                    notional = size * price
+                    exists = False
+                    for o in open_buy_orders:
+                        price_match = abs(float(o['price']) - price) < 1e-8
+                        size_match = abs(float(o['amount']) - size) < 1e-5
+                        if price_match and size_match:
+                            exists = True
+                            break
+                    if size > 0 and notional >= MIN_NOTIONAL:
+                        if exists:
+                            for o in open_buy_orders:
+                                if abs(float(o['price']) - price) < 1e-8:
+                                    size_diff = float(o['amount']) - size
+                                    logging.info(f"Skipped placing buy order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
+                                    break
+                        else:
+                            try:
+                                buy_order = exchange.create_order(
+                                    symbol, 'limit', 'buy', size, price, {'type': 'maker'}
+                                )
+                                logging.info(f"Placed buy order: price={price}, size={size}")
+                            except Exception as e:
+                                logging.error(f"Error placing buy order: {e}")
             else:
-                buy_balance = available_quote if in_buy_zone else available_quote * 0.1
-            if available_base < 1e-8:
-                logging.info("No available base balance. Skipping sell order placement.")
-                sell_balance = 0.0
-            else:
-                sell_balance = available_base if in_sell_zone else available_base * 0.1
-            min_size = 1.0  # for profit calc
-            breakeven_sell = breakeven_sell_price(buy_price, min_size)
-            target_sell_price = breakeven_sell + (min_profit / min_size)
-            breakeven_buy = breakeven_buy_price(sell_price, min_size)
-            target_buy_price = breakeven_buy - (min_profit / min_size)
-            buy_outer = min(buy_price, target_buy_price)
-            buy_tick = 0.0002
-            buy_prices = [buy_outer - i * buy_tick for i in range(3)]
-            sell_tick = 0.0002
-            if best_ask >= 1.0:
-                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
-            else:
-                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
-            def get_weights(n):
-                if n == 3:
-                    return [0.4, 0.35, 0.25]
-                elif n == 2:
-                    return [0.6, 0.4]
-                else:
-                    return [1.0]
-            # BUY SIZES
-            max_buy_size = buy_balance / buy_outer if buy_outer > 0 else 0.0
-            buy_weights = get_weights(3)
-            buy_sizes = [max_buy_size * w for w in buy_weights]
-            buy_n = 3
-            for n in [3,2,1]:
-                weights = get_weights(n)
-                sizes = [max_buy_size * w for w in weights]
-                notionals = [sizes[i] * buy_prices[i] for i in range(n)]
-                if all(nl >= MIN_NOTIONAL for nl in notionals):
-                    buy_n = n
-                    buy_sizes = sizes[:n]
-                    buy_prices = buy_prices[:n]
-                    break
-            # SELL SIZES
-            max_sell_size = sell_balance
-            sell_weights = get_weights(3)
-            sell_sizes = [max_sell_size * w for w in sell_weights]
-            sell_n = 3
-            for n in [3,2,1]:
-                weights = get_weights(n)
-                sizes = [max_sell_size * w for w in weights]
-                notionals = [sizes[i] * sell_prices[i] for i in range(n)]
-                if all(nl >= MIN_NOTIONAL for nl in notionals):
-                    sell_n = n
-                    sell_sizes = sizes[:n]
-                    sell_prices = sell_prices[:n]
-                    break
-            try:
-                open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
-            except Exception as e:
-                logging.error(f"Error fetching open orders: {e}")
-                open_orders = []
-            def quantize_size(size):
-                return round(size, 5)
-            open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
-            for o in open_buy_orders:
-                # Only cancel buy orders if their price is outside the buy zone boundaries
-                if not (BUY_ZONE_LOW <= float(o['price']) <= BUY_ZONE_HIGH):
+                # Cancel all buy orders if not in buy zone
+                try:
+                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                except Exception as e:
+                    logging.error(f"Error fetching open orders: {e}")
+                    open_orders = []
+                open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
+                for o in open_buy_orders:
                     try:
                         exchange.cancel_order(o['id'], symbol)
                         logging.info(f"Cancelled buy order at {o['price']} (outside buy zone)")
                     except Exception as e:
                         logging.error(f"Error canceling buy order: {e}")
-            open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
-            for o in open_sell_orders:
-                # Only cancel sell orders if their price is outside the sell zone boundaries
-                if not (SELL_ZONE_LOW <= float(o['price']) <= SELL_ZONE_HIGH):
+            # --- SELL ORDERS ---
+            if in_sell_zone and available_base > 1e-8:
+                sell_balance = available_base  # Use 100% of available base
+                sell_prices = [
+                    SELL_ZONE_LOW + (SELL_ZONE_HIGH - SELL_ZONE_LOW) * i / 2 for i in range(3)
+                ]
+                sell_weights = get_weights(3)
+                max_sell_size = sell_balance
+                sell_sizes = [max_sell_size * w for w in sell_weights]
+                sell_n = 3
+                for n in [3,2,1]:
+                    weights = get_weights(n)
+                    sizes = [max_sell_size * w for w in weights]
+                    notionals = [sizes[i] * sell_prices[i] for i in range(n)]
+                    if all(nl >= MIN_NOTIONAL for nl in notionals):
+                        sell_n = n
+                        sell_sizes = sizes[:n]
+                        sell_prices = sell_prices[:n]
+                        break
+                try:
+                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                except Exception as e:
+                    logging.error(f"Error fetching open orders: {e}")
+                    open_orders = []
+                open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
+                for o in open_sell_orders:
+                    if not (SELL_ZONE_LOW <= float(o['price']) <= SELL_ZONE_HIGH):
+                        try:
+                            exchange.cancel_order(o['id'], symbol)
+                            logging.info(f"Cancelled sell order at {o['price']} (outside sell zone)")
+                        except Exception as e:
+                            logging.error(f"Error canceling sell order: {e}")
+                for i in range(sell_n):
+                    size = quantize_size(sell_sizes[i])
+                    price = sell_prices[i]
+                    notional = size * price
+                    exists = False
+                    for o in open_sell_orders:
+                        price_match = abs(float(o['price']) - price) < 1e-8
+                        size_match = abs(float(o['amount']) - size) < 1e-5
+                        if price_match and size_match:
+                            exists = True
+                            break
+                    if size > 0 and notional >= MIN_NOTIONAL:
+                        if exists:
+                            for o in open_sell_orders:
+                                if abs(float(o['price']) - price) < 1e-8:
+                                    size_diff = float(o['amount']) - size
+                                    logging.info(f"Skipped placing sell order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
+                                    break
+                        else:
+                            try:
+                                sell_order = exchange.create_order(
+                                    symbol, 'limit', 'sell', size, price, {'type': 'maker'}
+                                )
+                                logging.info(f"Placed sell order: price={price}, size={size}")
+                            except Exception as e:
+                                logging.error(f"Error placing sell order: {e}")
+            else:
+                # Cancel all sell orders if not in sell zone
+                try:
+                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                except Exception as e:
+                    logging.error(f"Error fetching open orders: {e}")
+                    open_orders = []
+                open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
+                for o in open_sell_orders:
                     try:
                         exchange.cancel_order(o['id'], symbol)
                         logging.info(f"Cancelled sell order at {o['price']} (outside sell zone)")
                     except Exception as e:
                         logging.error(f"Error canceling sell order: {e}")
-            for i in range(buy_n):
-                size = quantize_size(buy_sizes[i])
-                price = buy_prices[i]
-                notional = size * price
-                exists = False
-                for o in open_buy_orders:
-                    price_match = abs(float(o['price']) - price) < 1e-8
-                    size_match = abs(float(o['amount']) - size) < 1e-5
-                    if price_match and size_match:
-                        exists = True
-                        break
-                if size > 0 and notional >= MIN_NOTIONAL:
-                    if exists:
-                        for o in open_buy_orders:
-                            if abs(float(o['price']) - price) < 1e-8:
-                                size_diff = float(o['amount']) - size
-                                logging.info(f"Skipped placing buy order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
-                                break
-                    else:
-                        try:
-                            buy_order = exchange.create_order(
-                                symbol, 'limit', 'buy', size, price, {'type': 'maker'}
-                            )
-                            logging.info(f"Placed buy order: price={price}, size={size}")
-                        except Exception as e:
-                            logging.error(f"Error placing buy order: {e}")
-            for i in range(sell_n):
-                size = quantize_size(sell_sizes[i])
-                price = sell_prices[i]
-                notional = size * price
-                exists = False
-                for o in open_sell_orders:
-                    price_match = abs(float(o['price']) - price) < 1e-8
-                    size_match = abs(float(o['amount']) - size) < 1e-5
-                    if price_match and size_match:
-                        exists = True
-                        break
-                if size > 0 and notional >= MIN_NOTIONAL:
-                    if exists:
-                        for o in open_sell_orders:
-                            if abs(float(o['price']) - price) < 1e-8:
-                                size_diff = float(o['amount']) - size
-                                logging.info(f"Skipped placing sell order at {price} size {size}: identical order already exists (size diff: {size_diff:+.8f}).")
-                                break
-                    else:
-                        try:
-                            sell_order = exchange.create_order(
-                                symbol, 'limit', 'sell', size, price, {'type': 'maker'}
-                            )
-                            logging.info(f"Placed sell order: price={price}, size={size}")
-                        except Exception as e:
-                            logging.error(f"Error placing sell order: {e}")
             return
 
         if shadow_mode:
