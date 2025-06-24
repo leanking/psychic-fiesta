@@ -80,6 +80,11 @@ print("USER_ADDRESS:", user_address)
 
 MIN_NOTIONAL = 10.0  # Minimum notional value for any order (in quote currency, e.g., $10)
 
+# Add at the top of the file, after other globals
+last_used_available_quote = None
+last_used_available_base = None
+STICKY_THRESHOLD = 0.001  # 0.1% change required to update order sizes
+
 def log_shadow_trade(order, fill_price=None):
     with open(shadow_log_file, 'a') as f:
         log_entry = {
@@ -237,6 +242,7 @@ if shadow_mode:
 # Update and place orders
 def update_orders(orderbook):
     global simulated_order_id, shadow_position
+    global last_used_available_quote, last_used_available_base
     try:
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
@@ -266,10 +272,33 @@ def update_orders(orderbook):
             if shadow_mode:
                 logging.info("[SHADOW] Skipping multi-order logic in shadow mode.")
                 return
-            # Calculate available balances
             base_balance, quote_balance = get_real_balances()
             available_quote = max(0.0, quote_balance - min_quote_balance)
             available_base = max(0.0, base_balance - min_base_balance)
+            # Sticky logic: Only update if available balance changes by more than threshold
+            update_buys = True
+            update_sells = True
+            if last_used_available_quote is not None:
+                if last_used_available_quote > 0:
+                    rel_change = abs(available_quote - last_used_available_quote) / last_used_available_quote
+                else:
+                    rel_change = 1.0 if available_quote > 0 else 0.0
+                if rel_change < STICKY_THRESHOLD:
+                    update_buys = False
+            if last_used_available_base is not None:
+                if last_used_available_base > 0:
+                    rel_change = abs(available_base - last_used_available_base) / last_used_available_base
+                else:
+                    rel_change = 1.0 if available_base > 0 else 0.0
+                if rel_change < STICKY_THRESHOLD:
+                    update_sells = False
+            if not update_buys and not update_sells:
+                logging.info(f"Sticky logic: No significant balance change (buys/sells). Skipping order update.")
+                return
+            if update_buys:
+                last_used_available_quote = available_quote
+            if update_sells:
+                last_used_available_base = available_base
             # BUY ORDERS
             # Outermost buy price from spread logic (current buy_price logic)
             min_size = 1.0  # for profit calc
