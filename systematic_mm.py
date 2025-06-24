@@ -68,8 +68,8 @@ MAKER_FEE_RATE = float(os.getenv('MAKER_FEE_RATE', '0.000384'))  # Default 0.038
 PER_TRADE_CLOSE_FEE = 0.02  # $0.02 per closed trade
 
 # SYSTEMATIC TRADING PRICES - USDHL specific
-SYSTEMATIC_BUY_PRICE = 0.99929
-SYSTEMATIC_SELL_PRICE = 1.00009
+SYSTEMATIC_BUY_PRICE = float(os.getenv('SYSTEMATIC_BUY_PRICE', '0.99929'))
+SYSTEMATIC_SELL_PRICE = float(os.getenv('SYSTEMATIC_SELL_PRICE', '1.00009'))
 
 print("API_Wallet:", api_key)
 print("USER_ADDRESS:", user_address)
