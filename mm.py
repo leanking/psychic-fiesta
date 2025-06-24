@@ -329,18 +329,20 @@ def update_orders(orderbook):
                 return round(size, 5)
             open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
             for o in open_buy_orders:
-                if not any(abs(float(o['price']) - p) < 1e-8 for p in buy_prices):
+                # Only cancel buy orders if their price is outside the buy zone boundaries
+                if not (BUY_ZONE_LOW <= float(o['price']) <= BUY_ZONE_HIGH):
                     try:
                         exchange.cancel_order(o['id'], symbol)
-                        logging.info(f"Cancelled buy order at {o['price']}")
+                        logging.info(f"Cancelled buy order at {o['price']} (outside buy zone)")
                     except Exception as e:
                         logging.error(f"Error canceling buy order: {e}")
             open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
             for o in open_sell_orders:
-                if not any(abs(float(o['price']) - p) < 1e-8 for p in sell_prices):
+                # Only cancel sell orders if their price is outside the sell zone boundaries
+                if not (SELL_ZONE_LOW <= float(o['price']) <= SELL_ZONE_HIGH):
                     try:
                         exchange.cancel_order(o['id'], symbol)
-                        logging.info(f"Cancelled sell order at {o['price']}")
+                        logging.info(f"Cancelled sell order at {o['price']} (outside sell zone)")
                     except Exception as e:
                         logging.error(f"Error canceling sell order: {e}")
             for i in range(buy_n):
