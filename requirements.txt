@@ -1,0 +1,13 @@
+# Core dependencies for market maker scripts
+ccxt>=4.0.0
+python-dotenv>=1.0.0
+websocket-client>=1.6.0
+requests>=2.31.0
+
+# Standard library imports (no need to include in requirements.txt):
+# - json
+# - time  
+# - logging
+# - os
+# - threading
+# - atexit 
