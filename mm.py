@@ -84,6 +84,8 @@ MIN_NOTIONAL = 10.0  # Minimum notional value for any order (in quote currency, 
 last_used_available_quote = None
 last_used_available_base = None
 STICKY_THRESHOLD = 0.001  # 0.1% change required to update order sizes
+last_used_buy_prices = None
+last_used_sell_prices = None
 
 def log_shadow_trade(order, fill_price=None):
     with open(shadow_log_file, 'a') as f:
@@ -243,6 +245,7 @@ if shadow_mode:
 def update_orders(orderbook):
     global simulated_order_id, shadow_position
     global last_used_available_quote, last_used_available_base
+    global last_used_buy_prices, last_used_sell_prices
     try:
         bids = orderbook.get('bids', [])
         asks = orderbook.get('asks', [])
@@ -292,9 +295,42 @@ def update_orders(orderbook):
                     rel_change = 1.0 if available_base > 0 else 0.0
                 if rel_change < STICKY_THRESHOLD:
                     update_sells = False
-            if not update_buys and not update_sells:
-                logging.info(f"Sticky logic: No significant balance change (buys/sells). Skipping order update.")
+            # --- Sticky logic for prices ---
+            # Calculate target buy and sell prices as before
+            min_size = 1.0  # for profit calc
+            breakeven_sell = breakeven_sell_price(buy_price, min_size)
+            target_sell_price = breakeven_sell + (min_profit / min_size)
+            breakeven_buy = breakeven_buy_price(sell_price, min_size)
+            target_buy_price = breakeven_buy - (min_profit / min_size)
+            buy_outer = min(buy_price, target_buy_price)
+            buy_tick = 0.00001 if buy_outer < 1.0 else 0.0001
+            buy_prices = [buy_outer - i * buy_tick for i in range(3)]
+            if best_ask >= 1.0:
+                sell_prices = [1.0001, 1.0000, 0.9999]
+                sell_tick = 0.0001
+            else:
+                sell_tick = 0.00001
+                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
+            # Only update if price changes by more than one tick
+            update_buy_prices = [True] * len(buy_prices)
+            update_sell_prices = [True] * len(sell_prices)
+            if last_used_buy_prices is not None and len(last_used_buy_prices) == len(buy_prices):
+                for i in range(len(buy_prices)):
+                    if abs(buy_prices[i] - last_used_buy_prices[i]) <= buy_tick:
+                        update_buy_prices[i] = False
+                        logging.info(f"Sticky logic: Buy price {buy_prices[i]} change <= tick. Skipping update for this price.")
+            if last_used_sell_prices is not None and len(last_used_sell_prices) == len(sell_prices):
+                for i in range(len(sell_prices)):
+                    if abs(sell_prices[i] - last_used_sell_prices[i]) <= sell_tick:
+                        update_sell_prices[i] = False
+                        logging.info(f"Sticky logic: Sell price {sell_prices[i]} change <= tick. Skipping update for this price.")
+            # If all are False and balances are sticky, skip entirely
+            if (not update_buys or not any(update_buy_prices)) and (not update_sells or not any(update_sell_prices)):
+                logging.info(f"Sticky logic: No significant price or balance change. Skipping order update.")
                 return
+            # Update last used prices
+            last_used_buy_prices = buy_prices.copy()
+            last_used_sell_prices = sell_prices.copy()
             if update_buys:
                 last_used_available_quote = available_quote
             if update_sells:
