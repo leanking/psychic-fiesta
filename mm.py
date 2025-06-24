@@ -78,6 +78,8 @@ logging.info(f"Logic mode loaded: {LOGIC_MODE.upper()}")
 print("API_Wallet:", api_key)
 print("USER_ADDRESS:", user_address)
 
+MIN_NOTIONAL = 10.0  # Minimum notional value for any order (in quote currency, e.g., $10)
+
 def log_shadow_trade(order, fill_price=None):
     with open(shadow_log_file, 'a') as f:
         log_entry = {
@@ -313,119 +315,127 @@ def update_orders(orderbook):
 
         # Place buy order
         if can_place_buy and buy_size > 0:
-            if not shadow_mode:
-                try:
-                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
-                except Exception as e:
-                    logging.error(f"Error fetching open orders: {e}")
-                    open_orders = []
-                open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
-                committed_quote = sum(float(o['price']) * float(o['amount']) for o in open_buy_orders)
-                available_quote = quote_balance - committed_quote
-                logging.info(f"Available quote after committed: {available_quote}")
-                if available_quote < buy_size * buy_price:
-                    logging.warning(f"Insufficient quote balance to place buy order: required={buy_size * buy_price}, available={available_quote}")
-                else:
-                    for o in open_buy_orders:
-                        if abs(float(o['price']) - buy_price) > 1e-8:
-                            try:
-                                exchange.cancel_order(o['id'], symbol)
-                                logging.info(f"Cancelled duplicate buy order at {o['price']}")
-                            except Exception as e:
-                                logging.error(f"Error canceling buy order: {e}")
-                    if not any(abs(float(o['price']) - buy_price) < 1e-8 for o in open_buy_orders):
-                        try:
-                            buy_order = exchange.create_order(
-                                symbol, 'limit', 'buy', buy_size, buy_price, {'type': 'maker'}
-                            )
-                            logging.info(f"Placed buy order: price={buy_price}, size={buy_size}")
-                        except Exception as e:
-                            logging.error(f"Error placing buy order: {e}")
+            buy_notional = buy_size * buy_price
+            if buy_notional < MIN_NOTIONAL:
+                logging.info(f"Buy order not placed: notional ${buy_notional:.2f} is below minimum ${MIN_NOTIONAL}.")
             else:
-                open_buy = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'buy'), None)
-                open_sell = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'sell'), None)
-                need_new_buy = True
-                if open_buy is not None:
-                    open_buy_price = float(open_buy['price'])
-                    open_buy_size = float(open_buy['size'])
-                    if abs(open_buy_price - buy_price) < 1e-8 and abs(open_buy_size - buy_size) < 1e-8:
-                        need_new_buy = False
-                if need_new_buy:
+                if not shadow_mode:
+                    try:
+                        open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                    except Exception as e:
+                        logging.error(f"Error fetching open orders: {e}")
+                        open_orders = []
+                    open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
+                    committed_quote = sum(float(o['price']) * float(o['amount']) for o in open_buy_orders)
+                    available_quote = quote_balance - committed_quote
+                    logging.info(f"Available quote after committed: {available_quote}")
+                    if available_quote < buy_size * buy_price:
+                        logging.warning(f"Insufficient quote balance to place buy order: required={buy_size * buy_price}, available={available_quote}")
+                    else:
+                        for o in open_buy_orders:
+                            if abs(float(o['price']) - buy_price) > 1e-8:
+                                try:
+                                    exchange.cancel_order(o['id'], symbol)
+                                    logging.info(f"Cancelled duplicate buy order at {o['price']}")
+                                except Exception as e:
+                                    logging.error(f"Error canceling buy order: {e}")
+                        if not any(abs(float(o['price']) - buy_price) < 1e-8 for o in open_buy_orders):
+                            try:
+                                buy_order = exchange.create_order(
+                                    symbol, 'limit', 'buy', buy_size, buy_price, {'type': 'maker'}
+                                )
+                                logging.info(f"Placed buy order: price={buy_price}, size={buy_size}")
+                            except Exception as e:
+                                logging.error(f"Error placing buy order: {e}")
+                else:
+                    open_buy = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'buy'), None)
+                    open_sell = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'sell'), None)
+                    need_new_buy = True
                     if open_buy is not None:
-                        open_buy['status'] = 'cancelled'
-                        log_shadow_trade(open_buy)
-                        logging.info(f"[SHADOW] Cancelled simulated buy order at {open_buy['price']}")
-                    buy_order = {
-                        'id': simulated_order_id,
-                        'side': 'buy',
-                        'price': buy_price,
-                        'size': buy_size,
-                        'status': 'open',
-                    }
-                    simulated_order_id += 1
-                    simulated_orders.append(buy_order)
-                    logging.info(f"[SHADOW] Placed simulated buy order: price={buy_price}, size={buy_size}")
-                    log_shadow_trade(buy_order)
-                    save_shadow_state()
+                        open_buy_price = float(open_buy['price'])
+                        open_buy_size = float(open_buy['size'])
+                        if abs(open_buy_price - buy_price) < 1e-8 and abs(open_buy_size - buy_size) < 1e-8:
+                            need_new_buy = False
+                    if need_new_buy:
+                        if open_buy is not None:
+                            open_buy['status'] = 'cancelled'
+                            log_shadow_trade(open_buy)
+                            logging.info(f"[SHADOW] Cancelled simulated buy order at {open_buy['price']}")
+                        buy_order = {
+                            'id': simulated_order_id,
+                            'side': 'buy',
+                            'price': buy_price,
+                            'size': buy_size,
+                            'status': 'open',
+                        }
+                        simulated_order_id += 1
+                        simulated_orders.append(buy_order)
+                        logging.info(f"[SHADOW] Placed simulated buy order: price={buy_price}, size={buy_size}")
+                        log_shadow_trade(buy_order)
+                        save_shadow_state()
         else:
             logging.info("Buy order not placed: inventory or balance constraints.")
 
         # Place sell order(s) with dynamic sizing and thin liquidity consideration
         if can_place_sell and total_to_sell > 0:
-            if not shadow_mode:
-                try:
-                    open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
-                except Exception as e:
-                    logging.error(f"Error fetching open orders: {e}")
-                    open_orders = []
-                open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
-                committed_base = sum(float(o['amount']) for o in open_sell_orders)
-                available_base = base_balance - committed_base
-                logging.info(f"Available base after committed: {available_base}")
-                orders_placed = 0
-                remaining_to_sell = available_base
-                while remaining_to_sell > 0 and orders_placed < 3:
-                    this_order_size = min(max_order_size, remaining_to_sell)
-                    if this_order_size <= 0:
-                        break
-                    if not any(abs(float(o['price']) - sell_price) < 1e-8 and abs(float(o['amount']) - this_order_size) < 1e-8 for o in open_sell_orders):
-                        try:
-                            sell_order = exchange.create_order(
-                                symbol, 'limit', 'sell', this_order_size, sell_price, {'type': 'maker'}
-                            )
-                            logging.info(f"Placed sell order: price={sell_price}, size={this_order_size}")
-                            orders_placed += 1
-                        except Exception as e:
-                            logging.error(f"Error placing sell order: {e}")
-                    remaining_to_sell -= this_order_size
-                if orders_placed == 0:
-                    logging.info("Sell order not placed: already at target price/size or inventory constraints.")
+            sell_notional = total_to_sell * sell_price
+            if sell_notional < MIN_NOTIONAL:
+                logging.info(f"Sell order not placed: notional ${sell_notional:.2f} is below minimum ${MIN_NOTIONAL}.")
             else:
-                open_buy = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'buy'), None)
-                open_sell = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'sell'), None)
-                need_new_sell = True
-                if open_sell is not None:
-                    open_sell_price = float(open_sell['price'])
-                    open_sell_size = float(open_sell['size'])
-                    if abs(open_sell_price - sell_price) < 1e-8 and abs(open_sell_size - total_to_sell) < 1e-8:
-                        need_new_sell = False
-                if need_new_sell:
+                if not shadow_mode:
+                    try:
+                        open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+                    except Exception as e:
+                        logging.error(f"Error fetching open orders: {e}")
+                        open_orders = []
+                    open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
+                    committed_base = sum(float(o['amount']) for o in open_sell_orders)
+                    available_base = base_balance - committed_base
+                    logging.info(f"Available base after committed: {available_base}")
+                    orders_placed = 0
+                    remaining_to_sell = available_base
+                    while remaining_to_sell > 0 and orders_placed < 3:
+                        this_order_size = min(max_order_size, remaining_to_sell)
+                        if this_order_size <= 0:
+                            break
+                        if not any(abs(float(o['price']) - sell_price) < 1e-8 and abs(float(o['amount']) - this_order_size) < 1e-8 for o in open_sell_orders):
+                            try:
+                                sell_order = exchange.create_order(
+                                    symbol, 'limit', 'sell', this_order_size, sell_price, {'type': 'maker'}
+                                )
+                                logging.info(f"Placed sell order: price={sell_price}, size={this_order_size}")
+                                orders_placed += 1
+                            except Exception as e:
+                                logging.error(f"Error placing sell order: {e}")
+                        remaining_to_sell -= this_order_size
+                    if orders_placed == 0:
+                        logging.info("Sell order not placed: already at target price/size or inventory constraints.")
+                else:
+                    open_buy = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'buy'), None)
+                    open_sell = next((o for o in simulated_orders if o['status'] == 'open' and o['side'] == 'sell'), None)
+                    need_new_sell = True
                     if open_sell is not None:
-                        open_sell['status'] = 'cancelled'
-                        log_shadow_trade(open_sell)
-                        logging.info(f"[SHADOW] Cancelled simulated sell order at {open_sell['price']}")
-                    sell_order = {
-                        'id': simulated_order_id,
-                        'side': 'sell',
-                        'price': sell_price,
-                        'size': total_to_sell,
-                        'status': 'open',
-                    }
-                    simulated_order_id += 1
-                    simulated_orders.append(sell_order)
-                    logging.info(f"[SHADOW] Placed simulated sell order: price={sell_price}, size={total_to_sell}")
-                    log_shadow_trade(sell_order)
-                    save_shadow_state()
+                        open_sell_price = float(open_sell['price'])
+                        open_sell_size = float(open_sell['size'])
+                        if abs(open_sell_price - sell_price) < 1e-8 and abs(open_sell_size - total_to_sell) < 1e-8:
+                            need_new_sell = False
+                    if need_new_sell:
+                        if open_sell is not None:
+                            open_sell['status'] = 'cancelled'
+                            log_shadow_trade(open_sell)
+                            logging.info(f"[SHADOW] Cancelled simulated sell order at {open_sell['price']}")
+                        sell_order = {
+                            'id': simulated_order_id,
+                            'side': 'sell',
+                            'price': sell_price,
+                            'size': total_to_sell,
+                            'status': 'open',
+                        }
+                        simulated_order_id += 1
+                        simulated_orders.append(sell_order)
+                        logging.info(f"[SHADOW] Placed simulated sell order: price={sell_price}, size={total_to_sell}")
+                        log_shadow_trade(sell_order)
+                        save_shadow_state()
         else:
             logging.info("Sell order not placed: inventory or balance constraints.")
 
