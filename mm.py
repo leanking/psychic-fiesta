@@ -262,23 +262,120 @@ def update_orders(orderbook):
             can_place_buy = in_buy_zone
             can_place_sell = in_sell_zone
         else:
-            # --- SPREAD MODE: Calculate breakeven prices ---
-            min_size = min(max_order_size, 1.0)
-            # For buy, set sell_price to breakeven + min_profit
+            # --- SPREAD MODE: New multi-order logic ---
+            if shadow_mode:
+                logging.info("[SHADOW] Skipping multi-order logic in shadow mode.")
+                return
+            # Calculate available balances
+            base_balance, quote_balance = get_real_balances()
+            available_quote = max(0.0, quote_balance - min_quote_balance)
+            available_base = max(0.0, base_balance - min_base_balance)
+            # BUY ORDERS
+            # Outermost buy price from spread logic (current buy_price logic)
+            min_size = 1.0  # for profit calc
             breakeven_sell = breakeven_sell_price(buy_price, min_size)
             target_sell_price = breakeven_sell + (min_profit / min_size)
-            # For sell, set buy_price to breakeven - min_profit
             breakeven_buy = breakeven_buy_price(sell_price, min_size)
             target_buy_price = breakeven_buy - (min_profit / min_size)
-            # Use the higher of calculated and current for sell, lower for buy
-            sell_price = max(sell_price, target_sell_price)
-            buy_price = min(buy_price, target_buy_price)
-            profit = expected_profit_after_fees(buy_price, sell_price, min_size)
-            if profit < min_profit:
-                logging.warning(f"Expected profit {profit:.6f} is less than min_profit {min_profit}. Skipping order placement.")
-                return
-            can_place_buy = True
-            can_place_sell = True
+            buy_outer = min(buy_price, target_buy_price)
+            # Tick size for buy
+            buy_tick = 0.00001 if buy_outer < 1.0 else 0.0001
+            buy_prices = [buy_outer - i * buy_tick for i in range(3)]
+            # SELL ORDERS
+            if best_ask >= 1.0:
+                sell_prices = [1.0001, 1.0000, 0.9999]
+                sell_tick = 0.0001
+            else:
+                sell_tick = 0.00001
+                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
+            # Sizing weights
+            def get_weights(n):
+                if n == 3:
+                    return [0.4, 0.35, 0.25]
+                elif n == 2:
+                    return [0.6, 0.4]
+                else:
+                    return [1.0]
+            # BUY SIZES
+            max_buy_size = available_quote / buy_outer if buy_outer > 0 else 0.0
+            buy_weights = get_weights(3)
+            buy_sizes = [max_buy_size * w for w in buy_weights]
+            # Check notional for each, fallback to 2 or 1 if needed
+            buy_n = 3
+            for n in [3,2,1]:
+                weights = get_weights(n)
+                sizes = [max_buy_size * w for w in weights]
+                notionals = [sizes[i] * buy_prices[i] for i in range(n)]
+                if all(nl >= MIN_NOTIONAL for nl in notionals):
+                    buy_n = n
+                    buy_sizes = sizes[:n]
+                    buy_prices = buy_prices[:n]
+                    break
+            # SELL SIZES
+            max_sell_size = available_base
+            sell_weights = get_weights(3)
+            sell_sizes = [max_sell_size * w for w in sell_weights]
+            sell_n = 3
+            for n in [3,2,1]:
+                weights = get_weights(n)
+                sizes = [max_sell_size * w for w in weights]
+                notionals = [sizes[i] * sell_prices[i] for i in range(n)]
+                if all(nl >= MIN_NOTIONAL for nl in notionals):
+                    sell_n = n
+                    sell_sizes = sizes[:n]
+                    sell_prices = sell_prices[:n]
+                    break
+            # Cancel/replace logic
+            try:
+                open_orders = exchange.fetch_open_orders(symbol, params={'user': user_address})
+            except Exception as e:
+                logging.error(f"Error fetching open orders: {e}")
+                open_orders = []
+            # Cancel all open buy orders at our target prices
+            open_buy_orders = [o for o in open_orders if o['side'] == 'buy']
+            for o in open_buy_orders:
+                if not any(abs(float(o['price']) - p) < 1e-8 for p in buy_prices):
+                    try:
+                        exchange.cancel_order(o['id'], symbol)
+                        logging.info(f"Cancelled buy order at {o['price']}")
+                    except Exception as e:
+                        logging.error(f"Error canceling buy order: {e}")
+            # Cancel all open sell orders at our target prices
+            open_sell_orders = [o for o in open_orders if o['side'] == 'sell']
+            for o in open_sell_orders:
+                if not any(abs(float(o['price']) - p) < 1e-8 for p in sell_prices):
+                    try:
+                        exchange.cancel_order(o['id'], symbol)
+                        logging.info(f"Cancelled sell order at {o['price']}")
+                    except Exception as e:
+                        logging.error(f"Error canceling sell order: {e}")
+            # Place buy orders
+            for i in range(buy_n):
+                size = buy_sizes[i]
+                price = buy_prices[i]
+                notional = size * price
+                if size > 0 and notional >= MIN_NOTIONAL:
+                    try:
+                        buy_order = exchange.create_order(
+                            symbol, 'limit', 'buy', size, price, {'type': 'maker'}
+                        )
+                        logging.info(f"Placed buy order: price={price}, size={size}")
+                    except Exception as e:
+                        logging.error(f"Error placing buy order: {e}")
+            # Place sell orders
+            for i in range(sell_n):
+                size = sell_sizes[i]
+                price = sell_prices[i]
+                notional = size * price
+                if size > 0 and notional >= MIN_NOTIONAL:
+                    try:
+                        sell_order = exchange.create_order(
+                            symbol, 'limit', 'sell', size, price, {'type': 'maker'}
+                        )
+                        logging.info(f"Placed sell order: price={price}, size={size}")
+                    except Exception as e:
+                        logging.error(f"Error placing sell order: {e}")
+            return
 
         if shadow_mode:
             position = get_shadow_position()
