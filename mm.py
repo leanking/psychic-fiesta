@@ -277,13 +277,12 @@ def update_orders(orderbook):
             breakeven_buy = breakeven_buy_price(sell_price, min_size)
             target_buy_price = breakeven_buy - (min_profit / min_size)
             buy_outer = min(buy_price, target_buy_price)
-            buy_tick = 0.00001 if buy_outer < 1.0 else 0.0001
+            buy_tick = 0.0005
             buy_prices = [buy_outer - i * buy_tick for i in range(3)]
+            sell_tick = 0.0005
             if best_ask >= 1.0:
-                sell_prices = [1.0001, 1.0000, 0.9999]
-                sell_tick = 0.0001
+                sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
             else:
-                sell_tick = 0.00001
                 sell_prices = [best_ask + 3*sell_tick, best_ask + 2*sell_tick, best_ask + 1*sell_tick]
             def get_weights(n):
                 if n == 3:
